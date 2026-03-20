@@ -1,0 +1,2855 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>myshelf 🏠</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #FDF8F0; font-family: 'M PLUS Rounded 1c', sans-serif; }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #F0E8D8; }
+::-webkit-scrollbar-thumb { background: #D9B48A; border-radius: 4px; }
+input:focus, textarea:focus, select:focus { border-color: #C8956A !important; outline: none; }
+@keyframes modalIn { from { opacity:0; transform: translateY(20px) scale(0.95); } to { opacity:1; transform:none; } }
+@keyframes leafSpin { 0%,100% { transform: rotate(-15deg); } 50% { transform: rotate(15deg); } }
+@keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+@keyframes fabBounce { 0% { transform:scale(0) rotate(-15deg); } 70% { transform:scale(1.12) rotate(4deg); } 100% { transform:scale(1) rotate(0); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+const {
+  useState,
+  useEffect,
+  useRef,
+  useCallback
+} = React;
+const C = {
+  bg: "#FDF8F0",
+  bgPanel: "#FFFCF6",
+  wood: "#C8956A",
+  woodLight: "#E8C99A",
+  woodDark: "#9B6B45",
+  woodBorder: "#D9B48A",
+  green: "#7DB87A",
+  greenLight: "#B8D9B5",
+  greenPale: "#EDF5EC",
+  yellow: "#F5C842",
+  yellowPale: "#FFF8DC",
+  blue: "#7AABCC",
+  bluePale: "#E8F4FA",
+  pink: "#E8A0B0",
+  pinkPale: "#FDF0F3",
+  brownMid: "#A07850",
+  brownLight: "#C8A878",
+  brownPale: "#F0E8D8",
+  text: "#5C3D1E",
+  textMid: "#8B6045",
+  textLight: "#B89070",
+  white: "#FFFDF8",
+  shadow: "rgba(139,96,69,0.12)"
+};
+const STATUS = {
+  want: {
+    label: "読みたい",
+    color: C.yellow,
+    bg: C.yellowPale,
+    icon: "🌟"
+  },
+  reading: {
+    label: "読書中",
+    color: C.blue,
+    bg: C.bluePale,
+    icon: "🌿"
+  },
+  done: {
+    label: "読了",
+    color: C.green,
+    bg: C.greenPale,
+    icon: "🍀"
+  }
+};
+const MEDIA = {
+  kindle: {
+    label: "Kindle",
+    icon: "📱"
+  },
+  paper: {
+    label: "紙",
+    icon: "📗"
+  },
+  piccoma: {
+    label: "ピッコマ",
+    icon: "📲"
+  },
+  narou: {
+    label: "小説家になろう",
+    icon: "✍️"
+  },
+  kakuyomu: {
+    label: "カクヨム",
+    icon: "📖"
+  }
+};
+
+// ── IndexedDB ストレージ ───────────────────────────
+const DB_NAME = "myshelf_db";
+const DB_VERSION = 1;
+const STORE_NAME = "books";
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, {
+          keyPath: "id"
+        });
+      }
+    };
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+async function loadFromStorage() {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const req = tx.objectStore(STORE_NAME).getAll();
+      req.onsuccess = e => {
+        const books = e.target.result || [];
+        // createdAt がなければ補完
+        resolve(books.map(b => b.createdAt ? b : {
+          ...b,
+          createdAt: new Date().toISOString()
+        }));
+      };
+      req.onerror = () => resolve([]);
+    });
+  } catch {
+    return [];
+  }
+}
+async function saveToStorage(books) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    // 全件クリアして書き直し
+    await new Promise((res, rej) => {
+      const r = store.clear();
+      r.onsuccess = res;
+      r.onerror = rej;
+    });
+    for (const book of books) {
+      store.put(book);
+    }
+    return new Promise((res, rej) => {
+      tx.oncomplete = res;
+      tx.onerror = rej;
+    });
+  } catch (e) {
+    console.warn("IndexedDB save error", e);
+  }
+}
+
+// localStorage からの移行（初回のみ）
+async function migrateFromLocalStorage() {
+  try {
+    const old = localStorage.getItem(STORAGE_KEY);
+    if (!old) return;
+    const books = JSON.parse(old);
+    if (books.length > 0) {
+      await saveToStorage(books);
+      localStorage.removeItem(STORAGE_KEY);
+      console.log("migrated", books.length, "books from localStorage");
+    }
+  } catch {/* 移行失敗は無視 */}
+}
+async function fetchBookByQuery(query) {
+  try {
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=5`);
+    const data = await res.json();
+    return data.items || [];
+  } catch {
+    return [];
+  }
+}
+function extractASIN(url) {
+  const m = url.match(/\/(?:dp|gp\/product|ASIN)\/([A-Z0-9]{10})/i);
+  return m ? m[1] : null;
+}
+async function fetchBookByAmazonURL(url) {
+  const asin = extractASIN(url);
+  if (!asin) return null;
+  const results = await fetchBookByQuery(asin);
+  return results[0] || null;
+}
+function getWeekKey(dateStr) {
+  if (!dateStr) return "不明";
+  const d = new Date(dateStr);
+  const day = d.getDay() || 7;
+  const mon = new Date(d);
+  mon.setDate(d.getDate() - day + 1);
+  const sun = new Date(mon);
+  sun.setDate(mon.getDate() + 6);
+  const fmt = dt => `${dt.getMonth() + 1}/${dt.getDate()}`;
+  return `${d.getFullYear()}年 ${fmt(mon)}〜${fmt(sun)}`;
+}
+function getMonthKey(dateStr) {
+  if (!dateStr) return "不明";
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}年${d.getMonth() + 1}月`;
+}
+function formatDate(dateStr) {
+  if (!dateStr) return "";
+  return new Date(dateStr).toLocaleDateString("ja-JP", {
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  });
+}
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// ── AIプロンプト生成 ───────────────────────────────
+function buildAIPrompt(books) {
+  const done = books.filter(b => b.status === "done");
+  const reading = books.filter(b => b.status === "reading");
+  const want = books.filter(b => b.status === "want");
+  const bookBlock = list => list.map(b => {
+    const tags = b.tags?.length ? ` [${b.tags.join(", ")}]` : "";
+    const date = b.doneDate ? ` (読了: ${formatDate(b.doneDate)})` : "";
+    const notes = (b.notes || []).map(n => `    ・${n.text}`).join("\n");
+    return `  「${b.title}」${b.author ? " / " + b.author : ""}${tags}${date}${notes ? "\n" + notes : ""}`;
+  }).join("\n");
+  return `以下は私の読書記録です。自己研鑽・学習の振り返りレポートとして活用できるよう、以下の点でまとめてください。
+
+## 読了した本 (${done.length}冊)
+${done.length > 0 ? bookBlock(done) : "  なし"}
+
+## 読書中の本 (${reading.length}冊)
+${reading.length > 0 ? bookBlock(reading) : "  なし"}
+
+## 読みたい本 (${want.length}冊)
+${want.length > 0 ? bookBlock(want) : "  なし"}
+
+---
+【まとめてほしい内容】
+1. 読書傾向（興味のあるジャンル・テーマの分析）
+2. 主な学び（読了本とメモから得られた知見・気づき）
+3. 今後の学習への提言（読みたい本リストも踏まえて）
+4. 自己研鑽レポート用の一言コメント（200字程度）`;
+}
+
+// ── スタイルヘルパー ──────────────────────────────
+const cs = (extra = {}) => ({
+  background: C.bgPanel,
+  border: `2px solid ${C.woodBorder}`,
+  borderRadius: 20,
+  boxShadow: `0 4px 0 ${C.woodLight}, 0 6px 16px ${C.shadow}`,
+  ...extra
+});
+const bs = (bg, color, extra = {}) => ({
+  background: bg,
+  color,
+  border: "none",
+  borderRadius: 50,
+  padding: "8px 20px",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  fontFamily: "'M PLUS Rounded 1c', sans-serif",
+  boxShadow: "0 3px 0 rgba(0,0,0,0.12)",
+  transition: "all 0.15s",
+  ...extra
+});
+const is = {
+  width: "100%",
+  background: C.yellowPale,
+  border: `2px solid ${C.woodBorder}`,
+  color: C.text,
+  borderRadius: 14,
+  padding: "10px 14px",
+  fontSize: 14,
+  fontFamily: "'M PLUS Rounded 1c', sans-serif",
+  boxSizing: "border-box"
+};
+
+// ── 共通コンポーネント ────────────────────────────
+function Tag({
+  label,
+  onRemove
+}) {
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 3,
+      background: C.greenPale,
+      color: C.green,
+      border: `1.5px solid ${C.greenLight}`,
+      borderRadius: 50,
+      padding: "2px 10px",
+      fontSize: 11,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700
+    }
+  }, "\uD83C\uDF3F ", label, onRemove && /*#__PURE__*/React.createElement("span", {
+    onClick: onRemove,
+    style: {
+      cursor: "pointer",
+      opacity: 0.6,
+      fontSize: 14,
+      lineHeight: 1,
+      marginLeft: 2
+    }
+  }, "\xD7"));
+}
+function StatusBadge({
+  status
+}) {
+  const s = STATUS[status];
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      background: s.bg,
+      color: s.color,
+      border: `1.5px solid ${s.color}66`,
+      borderRadius: 50,
+      padding: "3px 12px",
+      fontSize: 11,
+      fontWeight: 700,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, s.icon, " ", s.label);
+}
+function Lbl({
+  children
+}) {
+  return /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "block",
+      color: C.brownMid,
+      fontSize: 12,
+      marginBottom: 6,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700
+    }
+  }, children);
+}
+function Modal({
+  children,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 1000,
+      background: "rgba(92,61,30,0.35)",
+      backdropFilter: "blur(4px)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: C.bgPanel,
+      border: `3px solid ${C.woodBorder}`,
+      borderRadius: 28,
+      padding: 28,
+      maxWidth: 560,
+      width: "100%",
+      maxHeight: "92vh",
+      overflowY: "auto",
+      boxShadow: `0 8px 0 ${C.woodLight}, 0 16px 40px ${C.shadow}`,
+      animation: "modalIn 0.22s cubic-bezier(.34,1.56,.64,1)"
+    }
+  }, children));
+}
+function Toast({
+  msg,
+  onDone
+}) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 2200);
+    return () => clearTimeout(t);
+  }, []);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      bottom: 32,
+      left: "50%",
+      transform: "translateX(-50%)",
+      background: C.wood,
+      color: C.white,
+      borderRadius: 50,
+      padding: "10px 24px",
+      fontSize: 13,
+      fontWeight: 700,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      boxShadow: `0 4px 0 ${C.woodDark}`,
+      zIndex: 2000,
+      animation: "fadeIn 0.2s ease",
+      whiteSpace: "nowrap"
+    }
+  }, msg);
+}
+
+// ── 本カード ──────────────────────────────────────
+function BookCard({
+  book,
+  onEdit,
+  onNotes,
+  onDelete
+}) {
+  const [hov, setHov] = useState(false);
+  return /*#__PURE__*/React.createElement("div", {
+    onMouseEnter: () => setHov(true),
+    onMouseLeave: () => setHov(false),
+    style: {
+      ...cs({
+        padding: 18,
+        display: "flex",
+        gap: 16,
+        transition: "all 0.2s"
+      }),
+      transform: hov ? "translateY(-2px)" : "",
+      boxShadow: hov ? `0 6px 0 ${C.woodLight}, 0 10px 24px ${C.shadow}` : `0 4px 0 ${C.woodLight}, 0 6px 16px ${C.shadow}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0
+    }
+  }, book.cover ? /*#__PURE__*/React.createElement("img", {
+    src: book.cover,
+    alt: book.title,
+    style: {
+      width: 62,
+      height: 88,
+      objectFit: "cover",
+      borderRadius: 10,
+      boxShadow: `2px 4px 0 ${C.woodLight}`,
+      border: `2px solid ${C.woodBorder}`
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 62,
+      height: 88,
+      borderRadius: 10,
+      background: `linear-gradient(145deg,${C.yellowPale},${C.brownPale})`,
+      border: `2px solid ${C.woodBorder}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 28,
+      boxShadow: `2px 4px 0 ${C.woodLight}`
+    }
+  }, "\uD83D\uDCD6")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 3px",
+      fontSize: 15,
+      fontWeight: 800,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      lineHeight: 1.4,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      display: "-webkit-box",
+      WebkitLineClamp: 2,
+      WebkitBoxOrient: "vertical"
+    }
+  }, book.title), book.author && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 7px",
+      fontSize: 12,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u270D\uFE0F ", book.author), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 7,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(StatusBadge, {
+    status: book.status
+  }), (book.media || []).map(m => MEDIA[m] && /*#__PURE__*/React.createElement("span", {
+    key: m,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      background: C.brownPale,
+      color: C.brownMid,
+      border: `1.5px solid ${C.woodBorder}`,
+      borderRadius: 50,
+      padding: "3px 10px",
+      fontSize: 11,
+      fontWeight: 700,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, MEDIA[m].icon, " ", MEDIA[m].label)), book.doneDate && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDCC5 ", formatDate(book.doneDate))), book.tags?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexWrap: "wrap",
+      marginTop: 7
+    }
+  }, book.tags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t
+  }))), book.notes?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      padding: "6px 10px",
+      background: C.yellowPale,
+      borderRadius: 10,
+      border: `1px dashed ${C.woodBorder}`,
+      display: "flex",
+      gap: 6,
+      alignItems: "flex-start"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, "\uD83D\uDCDD"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: C.brownMid,
+      lineHeight: 1.5,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      display: "-webkit-box",
+      WebkitLineClamp: 1,
+      WebkitBoxOrient: "vertical",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, book.notes[book.notes.length - 1].text, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.textLight,
+      marginLeft: 6
+    }
+  }, "\uFF08", book.notes.length, "\u4EF6\uFF09"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onNotes(book),
+    style: bs(C.green, C.white, {
+      padding: "5px 14px",
+      fontSize: 11,
+      boxShadow: `0 2px 0 ${C.woodDark}44`
+    }),
+    onMouseEnter: e => e.currentTarget.style.opacity = "0.85",
+    onMouseLeave: e => e.currentTarget.style.opacity = "1"
+  }, "\uD83D\uDCDD \u30E1\u30E2"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onEdit(book),
+    style: bs(C.brownPale, C.brownMid, {
+      padding: "5px 14px",
+      fontSize: 11,
+      border: `1.5px solid ${C.woodBorder}`,
+      boxShadow: "none"
+    }),
+    onMouseEnter: e => e.currentTarget.style.background = C.woodBorder,
+    onMouseLeave: e => e.currentTarget.style.background = C.brownPale
+  }, "\u270F\uFE0F \u7DE8\u96C6"))), /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      onDelete(book.id);
+    },
+    style: {
+      background: "none",
+      border: "none",
+      color: C.brownLight,
+      cursor: "pointer",
+      fontSize: 18,
+      padding: 4,
+      alignSelf: "flex-start",
+      lineHeight: 1,
+      transition: "all 0.15s",
+      borderRadius: 50
+    },
+    onMouseEnter: e => {
+      e.currentTarget.style.color = C.pink;
+      e.currentTarget.style.background = C.pinkPale;
+    },
+    onMouseLeave: e => {
+      e.currentTarget.style.color = C.brownLight;
+      e.currentTarget.style.background = "none";
+    }
+  }, "\u2715"));
+}
+
+// ── メモタイムラインモーダル ──────────────────────
+function NotesModal({
+  book,
+  onSave,
+  onClose
+}) {
+  const [notes, setNotes] = useState(book.notes || []);
+  const [input, setInput] = useState("");
+  const [tagInput, setTagInput] = useState("");
+  const [noteTags, setNoteTags] = useState([]);
+  const bottomRef = useRef(null);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({
+      behavior: "smooth"
+    });
+  }, [notes]);
+  const addNote = () => {
+    const text = input.trim();
+    if (!text) return;
+    const note = {
+      id: Date.now().toString(),
+      text,
+      tags: noteTags,
+      createdAt: new Date().toISOString()
+    };
+    const next = [...notes, note];
+    setNotes(next);
+    setInput("");
+    setNoteTags([]);
+    setTagInput("");
+    onSave({
+      ...book,
+      notes: next
+    });
+  };
+  const deleteNote = id => {
+    const next = notes.filter(n => n.id !== id);
+    setNotes(next);
+    onSave({
+      ...book,
+      notes: next
+    });
+  };
+  const addNoteTag = () => {
+    const t = tagInput.trim();
+    if (t && !noteTags.includes(t)) setNoteTags(p => [...p, t]);
+    setTagInput("");
+  };
+  return /*#__PURE__*/React.createElement(Modal, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      marginBottom: 20,
+      alignItems: "flex-start"
+    }
+  }, book.cover ? /*#__PURE__*/React.createElement("img", {
+    src: book.cover,
+    style: {
+      width: 48,
+      height: 68,
+      objectFit: "cover",
+      borderRadius: 10,
+      border: `2px solid ${C.woodBorder}`,
+      flexShrink: 0
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 48,
+      height: 68,
+      background: C.yellowPale,
+      borderRadius: 10,
+      border: `2px solid ${C.woodBorder}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 24,
+      flexShrink: 0
+    }
+  }, "\uD83D\uDCD6"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: "0 0 3px",
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontSize: 15,
+      fontWeight: 800,
+      lineHeight: 1.4
+    }
+  }, book.title), book.author && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u270D\uFE0F ", book.author), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDCDD \u30E1\u30E2\u306E\u30BF\u30A4\u30E0\u30E9\u30A4\u30F3"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 300,
+      overflowY: "auto",
+      marginBottom: 16,
+      paddingRight: 4
+    }
+  }, notes.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "32px 0",
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 36,
+      marginBottom: 8
+    }
+  }, "\uD83C\uDF31"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13
+    }
+  }, "\u307E\u3060\u30E1\u30E2\u304C\u306A\u3044\u3088"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 11
+    }
+  }, "\u6C17\u3065\u304D\u3084\u611F\u60F3\u3092\u6B8B\u3057\u3066\u307F\u3088\u3046\uFF01")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column"
+    }
+  }, notes.map((note, i) => /*#__PURE__*/React.createElement("div", {
+    key: note.id,
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      flexShrink: 0,
+      width: 24
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 20,
+      height: 20,
+      borderRadius: "50%",
+      marginTop: 12,
+      flexShrink: 0,
+      background: C.green,
+      border: `3px solid ${C.greenLight}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 9
+    }
+  }, "\uD83C\uDF43"), i < notes.length - 1 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 2,
+      flex: 1,
+      background: C.greenLight,
+      minHeight: 12,
+      borderRadius: 2,
+      margin: "2px 0"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      paddingBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.yellowPale,
+      border: `2px solid ${C.woodBorder}`,
+      borderRadius: 16,
+      padding: "10px 14px",
+      boxShadow: `0 2px 0 ${C.woodLight}`,
+      position: "relative"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 20px 0 0",
+      fontSize: 13,
+      color: C.text,
+      lineHeight: 1.75,
+      whiteSpace: "pre-wrap",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, note.text), note.tags?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexWrap: "wrap",
+      marginTop: 7
+    }
+  }, note.tags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t
+  }))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 10,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDD50 ", fmtTime(note.createdAt)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteNote(note.id),
+    style: {
+      position: "absolute",
+      top: 8,
+      right: 10,
+      background: "none",
+      border: "none",
+      color: C.brownLight,
+      cursor: "pointer",
+      fontSize: 14,
+      padding: 2,
+      lineHeight: 1,
+      borderRadius: "50%",
+      transition: "all 0.15s"
+    },
+    onMouseEnter: e => {
+      e.currentTarget.style.color = C.pink;
+      e.currentTarget.style.background = C.pinkPale;
+    },
+    onMouseLeave: e => {
+      e.currentTarget.style.color = C.brownLight;
+      e.currentTarget.style.background = "none";
+    }
+  }, "\u2715"))))), /*#__PURE__*/React.createElement("div", {
+    ref: bottomRef
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.bg,
+      border: `2px solid ${C.woodBorder}`,
+      borderRadius: 18,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("textarea", {
+    value: input,
+    onChange: e => setInput(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) addNote();
+    },
+    placeholder: "\u6C17\u3065\u304D\u30FB\u5F15\u7528\u30FB\u611F\u60F3\u3092\u66F8\u3044\u3066\u306D\u2026 (Cmd+Enter\u3067\u8FFD\u52A0)",
+    rows: 3,
+    style: {
+      width: "100%",
+      background: "none",
+      border: "none",
+      outline: "none",
+      color: C.text,
+      fontSize: 13,
+      lineHeight: 1.75,
+      resize: "none",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }), noteTags.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexWrap: "wrap",
+      marginBottom: 8
+    }
+  }, noteTags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t,
+    onRemove: () => setNoteTags(p => p.filter(x => x !== t))
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      borderTop: `1.5px dashed ${C.woodBorder}`,
+      paddingTop: 10,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: tagInput,
+    onChange: e => setTagInput(e.target.value),
+    onKeyDown: e => e.key === "Enter" && addNoteTag(),
+    placeholder: "\u30BF\u30B0\u2026",
+    style: {
+      ...is,
+      flex: 1,
+      padding: "5px 10px",
+      fontSize: 12,
+      borderRadius: 50
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: addNoteTag,
+    style: bs(C.greenPale, C.green, {
+      padding: "5px 12px",
+      fontSize: 12,
+      border: `1.5px solid ${C.greenLight}`,
+      boxShadow: "none"
+    })
+  }, "+\u30BF\u30B0"), /*#__PURE__*/React.createElement("button", {
+    onClick: addNote,
+    disabled: !input.trim(),
+    style: bs(input.trim() ? C.green : C.brownPale, input.trim() ? C.white : C.brownLight, {
+      padding: "6px 18px"
+    }),
+    onMouseEnter: e => {
+      if (input.trim()) e.currentTarget.style.opacity = "0.85";
+    },
+    onMouseLeave: e => e.currentTarget.style.opacity = "1"
+  }, "\u8FFD\u52A0 \uD83C\uDF3F"))), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      ...bs(C.brownPale, C.brownMid, {
+        width: "100%",
+        marginTop: 12,
+        border: `1.5px solid ${C.woodBorder}`,
+        boxShadow: "none"
+      })
+    }
+  }, "\u3068\u3058\u308B \uD83C\uDFE0"));
+}
+
+// ── 画像をBase64に変換（登録時に一度だけ） ─────────
+async function imageUrlToBase64(url) {
+  try {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result); // "data:image/jpeg;base64,..."
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return url; // 失敗したら元のURLをそのまま使う
+  }
+}
+
+// ── 本登録・編集モーダル ──────────────────────────
+function BookModal({
+  book,
+  onSave,
+  onClose
+}) {
+  const isNew = !book.id;
+  const [form, setForm] = useState({
+    title: book.title || "",
+    author: book.author || "",
+    cover: book.cover || "",
+    status: book.status || "want",
+    media: book.media || (book.medium ? [book.medium] : []),
+    tags: book.tags || [],
+    doneDate: book.doneDate || ""
+  });
+  const [tagInput, setTagInput] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    if (searchQuery.includes("amazon.co.jp") || searchQuery.includes("amazon.com")) {
+      const item = await fetchBookByAmazonURL(searchQuery);
+      if (item) {
+        pickResult(item);
+        setSearching(false);
+        return;
+      }
+    }
+    setSearchResults(await fetchBookByQuery(searchQuery));
+    setSearching(false);
+  };
+  const [converting, setConverting] = useState(false);
+  const pickResult = async item => {
+    const info = item.volumeInfo;
+    const rawCover = info.imageLinks?.thumbnail?.replace("http:", "https:") || "";
+    setSearchResults([]);
+    setSearchQuery("");
+    if (rawCover) {
+      setConverting(true);
+      const base64Cover = await imageUrlToBase64(rawCover);
+      setForm(f => ({
+        ...f,
+        title: info.title || f.title,
+        author: (info.authors || []).join(", ") || f.author,
+        cover: base64Cover
+      }));
+      setConverting(false);
+    } else {
+      setForm(f => ({
+        ...f,
+        title: info.title || f.title,
+        author: (info.authors || []).join(", ") || f.author
+      }));
+    }
+  };
+  const addTag = () => {
+    const t = tagInput.trim();
+    if (t && !form.tags.includes(t)) setForm(f => ({
+      ...f,
+      tags: [...f.tags, t]
+    }));
+    setTagInput("");
+  };
+  return /*#__PURE__*/React.createElement(Modal, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 32,
+      marginBottom: 4
+    }
+  }, isNew ? "📚" : "✏️"), /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontSize: 18,
+      fontWeight: 800
+    }
+  }, isNew ? "本を追加しよう！" : "本を編集するよ")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83D\uDD0D Amazon URL\u30FBISBN\u30FB\u30AD\u30FC\u30EF\u30FC\u30C9\u691C\u7D22"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: searchQuery,
+    onChange: e => setSearchQuery(e.target.value),
+    onKeyDown: e => e.key === "Enter" && handleSearch(),
+    placeholder: "\u30BF\u30A4\u30C8\u30EB\u3084URL\u3092\u30DA\u30FC\u30B9\u30C8\u2026",
+    style: {
+      ...is,
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: handleSearch,
+    disabled: searching,
+    style: bs(C.wood, C.white, {
+      whiteSpace: "nowrap",
+      opacity: searching ? 0.6 : 1
+    })
+  }, searching ? "🌿" : "検索")), searchResults.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      background: C.white,
+      border: `2px solid ${C.woodBorder}`,
+      borderRadius: 14,
+      overflow: "hidden"
+    }
+  }, searchResults.map(item => /*#__PURE__*/React.createElement("div", {
+    key: item.id,
+    onClick: () => pickResult(item),
+    style: {
+      display: "flex",
+      gap: 12,
+      padding: "10px 14px",
+      cursor: "pointer",
+      borderBottom: `1px solid ${C.brownPale}`,
+      transition: "background 0.15s"
+    },
+    onMouseEnter: e => e.currentTarget.style.background = C.yellowPale,
+    onMouseLeave: e => e.currentTarget.style.background = ""
+  }, item.volumeInfo.imageLinks?.thumbnail && /*#__PURE__*/React.createElement("img", {
+    src: item.volumeInfo.imageLinks.thumbnail.replace("http:", "https:"),
+    style: {
+      width: 32,
+      height: 46,
+      objectFit: "cover",
+      borderRadius: 6
+    }
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700
+    }
+  }, item.volumeInfo.title), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 11,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, (item.volumeInfo.authors || []).join(", "))))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83D\uDCD6 \u30BF\u30A4\u30C8\u30EB"), /*#__PURE__*/React.createElement("input", {
+    value: form.title,
+    onChange: e => setForm(f => ({
+      ...f,
+      title: e.target.value
+    })),
+    placeholder: "\u672C\u306E\u30BF\u30A4\u30C8\u30EB",
+    style: is
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\u270D\uFE0F \u8457\u8005"), /*#__PURE__*/React.createElement("input", {
+    value: form.author,
+    onChange: e => setForm(f => ({
+      ...f,
+      author: e.target.value
+    })),
+    placeholder: "\u8457\u8005\u540D",
+    style: is
+  })), (form.cover || converting) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14,
+      display: "flex",
+      alignItems: "center",
+      gap: 12
+    }
+  }, converting ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 52,
+      height: 74,
+      background: C.yellowPale,
+      borderRadius: 8,
+      border: `2px solid ${C.woodBorder}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 20,
+      animation: "leafSpin 1s ease-in-out infinite"
+    }
+  }, "\uD83C\uDF3F") : /*#__PURE__*/React.createElement("img", {
+    src: form.cover,
+    style: {
+      width: 52,
+      height: 74,
+      objectFit: "cover",
+      borderRadius: 8,
+      border: `2px solid ${C.woodBorder}`,
+      boxShadow: `2px 3px 0 ${C.woodLight}`
+    }
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: C.brownMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700
+    }
+  }, converting ? "表紙を保存中…" : "表紙を取得したよ🍀"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "3px 0 0",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, converting ? "オフラインでも表示できるように変換中" : "このままオフラインで使えます"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83C\uDF3F \u30B9\u30C6\u30FC\u30BF\u30B9"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, Object.entries(STATUS).map(([k, v]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    onClick: () => setForm(f => ({
+      ...f,
+      status: k
+    })),
+    style: {
+      flex: 1,
+      background: form.status === k ? v.bg : C.white,
+      color: form.status === k ? v.color : C.textLight,
+      border: `2px solid ${form.status === k ? v.color : C.woodBorder}`,
+      borderRadius: 50,
+      padding: "8px 0",
+      fontSize: 12,
+      cursor: "pointer",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700,
+      transition: "all 0.15s",
+      boxShadow: form.status === k ? `0 3px 0 ${v.color}44` : "none"
+    }
+  }, v.icon, " ", v.label)))), form.status === "done" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83D\uDCC5 \u8AAD\u4E86\u65E5"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: form.doneDate,
+    onChange: e => setForm(f => ({
+      ...f,
+      doneDate: e.target.value
+    })),
+    style: is
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83D\uDCDA \u8AAD\u3093\u3060\u5A92\u4F53\uFF08\u8907\u6570\u9078\u629E\u53EF\uFF09"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      flexWrap: "wrap"
+    }
+  }, Object.entries(MEDIA).map(([k, v]) => {
+    const selected = (form.media || []).includes(k);
+    return /*#__PURE__*/React.createElement("button", {
+      key: k,
+      onClick: () => setForm(f => ({
+        ...f,
+        media: selected ? f.media.filter(x => x !== k) : [...(f.media || []), k]
+      })),
+      style: {
+        background: selected ? C.brownPale : C.white,
+        color: selected ? C.brownMid : C.textLight,
+        border: `2px solid ${selected ? C.woodDark : C.woodBorder}`,
+        borderRadius: 50,
+        padding: "6px 14px",
+        fontSize: 12,
+        cursor: "pointer",
+        fontFamily: "'M PLUS Rounded 1c', sans-serif",
+        fontWeight: 700,
+        transition: "all 0.15s",
+        boxShadow: selected ? `0 2px 0 ${C.woodDark}` : "none"
+      }
+    }, v.icon, " ", v.label);
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83C\uDFF7 \u30BF\u30B0"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: tagInput,
+    onChange: e => setTagInput(e.target.value),
+    onKeyDown: e => e.key === "Enter" && addTag(),
+    placeholder: "\u30BF\u30B0\u3092\u5165\u529B\u3057\u3066Enter\u2026",
+    style: {
+      ...is,
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: addTag,
+    style: bs(C.greenPale, C.green, {
+      border: `1.5px solid ${C.greenLight}`,
+      boxShadow: "none"
+    })
+  }, "\u8FFD\u52A0")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      flexWrap: "wrap"
+    }
+  }, form.tags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t,
+    onRemove: () => setForm(f => ({
+      ...f,
+      tags: f.tags.filter(x => x !== t)
+    }))
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onSave({
+      ...book,
+      ...form,
+      id: book.id || Date.now().toString()
+    }),
+    disabled: converting,
+    style: bs(converting ? C.brownPale : C.wood, converting ? C.brownLight : C.white, {
+      flex: 1,
+      fontSize: 14,
+      opacity: converting ? 0.6 : 1
+    }),
+    onMouseEnter: e => {
+      if (!converting) e.currentTarget.style.opacity = "0.88";
+    },
+    onMouseLeave: e => e.currentTarget.style.opacity = converting ? "0.6" : "1"
+  }, converting ? "🌿 変換中…" : isNew ? "✨ 追加する！" : "💾 保存する"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: bs(C.brownPale, C.brownMid, {
+      border: `1.5px solid ${C.woodBorder}`,
+      boxShadow: "none"
+    })
+  }, "\u3084\u3081\u308B")));
+}
+
+// ── AIプロンプトモーダル ──────────────────────────
+function AIPromptModal({
+  books,
+  onClose,
+  onToast
+}) {
+  const prompt = buildAIPrompt(books);
+  const copy = () => {
+    navigator.clipboard.writeText(prompt).then(() => {
+      onToast("📋 コピーしたよ！");
+      onClose();
+    });
+  };
+  return /*#__PURE__*/React.createElement(Modal, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 32,
+      marginBottom: 4
+    }
+  }, "\u2728"), /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontSize: 18,
+      fontWeight: 800
+    }
+  }, "AI\u306B\u6E21\u3059\u30D7\u30ED\u30F3\u30D7\u30C8"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 12,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u30B3\u30D4\u30FC\u3057\u3066 ChatGPT \u3084 Claude \u306B\u8CBC\u308A\u4ED8\u3051\u3066\u306D")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.yellowPale,
+      border: `2px dashed ${C.woodBorder}`,
+      borderRadius: 16,
+      padding: 16,
+      maxHeight: 320,
+      overflowY: "auto",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("pre", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: C.text,
+      lineHeight: 1.8,
+      whiteSpace: "pre-wrap",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, prompt)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: copy,
+    style: bs(C.green, C.white, {
+      flex: 1
+    }),
+    onMouseEnter: e => e.currentTarget.style.opacity = "0.85",
+    onMouseLeave: e => e.currentTarget.style.opacity = "1"
+  }, "\uD83D\uDCCB \u30B3\u30D4\u30FC\u3059\u308B"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: bs(C.brownPale, C.brownMid, {
+      border: `1.5px solid ${C.woodBorder}`,
+      boxShadow: "none"
+    })
+  }, "\u3068\u3058\u308B")));
+}
+
+// ── JSONインポート／エクスポートモーダル ──────────
+function DataModal({
+  books,
+  onImport,
+  onClose,
+  onToast
+}) {
+  const [tab, setTab] = useState("export"); // export | import
+  const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState("");
+  const doExport = () => {
+    const data = JSON.stringify({
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      books
+    }, null, 2);
+    const a = document.createElement("a");
+    a.href = "data:application/json;charset=utf-8," + encodeURIComponent(data);
+    a.download = `myshelf_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    onToast("📦 JSONをエクスポートしたよ！");
+    onClose();
+  };
+  const doExportTextOnly = () => {
+    const stripped = books.map(({
+      cover,
+      ...rest
+    }) => rest);
+    const data = JSON.stringify({
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      books: stripped
+    }, null, 2);
+    const a = document.createElement("a");
+    a.href = "data:application/json;charset=utf-8," + encodeURIComponent(data);
+    a.download = `myshelf_text_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    onToast("📄 テキストのみエクスポートしたよ！");
+    onClose();
+  };
+  const copyExport = () => {
+    const data = JSON.stringify({
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      books
+    }, null, 2);
+    navigator.clipboard.writeText(data).then(() => {
+      onToast("📋 JSONをコピーしたよ！");
+      onClose();
+    });
+  };
+  const doImport = () => {
+    setImportError("");
+    try {
+      const parsed = JSON.parse(importText);
+      const importedBooks = parsed.books || parsed; // 配列直接もOK
+      if (!Array.isArray(importedBooks)) {
+        setImportError("データの形式が違うみたい…");
+        return;
+      }
+      const valid = importedBooks.filter(b => b.id && b.title && b.status);
+      if (valid.length === 0) {
+        setImportError("有効な本のデータが見つからなかったよ");
+        return;
+      }
+      onImport(valid);
+      onToast(`🍀 ${valid.length}冊をインポートしたよ！`);
+      onClose();
+    } catch {
+      setImportError("JSONの形式が正しくないみたい…");
+    }
+  };
+  const handleFile = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => setImportText(ev.target.result);
+    reader.readAsText(file);
+  };
+  return /*#__PURE__*/React.createElement(Modal, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 32,
+      marginBottom: 4
+    }
+  }, "\uD83D\uDCE6"), /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontSize: 18,
+      fontWeight: 800
+    }
+  }, "\u30C7\u30FC\u30BF\u306E\u7BA1\u7406")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      background: C.brownPale,
+      borderRadius: 50,
+      padding: 4,
+      gap: 2,
+      marginBottom: 20
+    }
+  }, [["export", "📤 エクスポート"], ["import", "📥 インポート"]].map(([t, l]) => /*#__PURE__*/React.createElement("button", {
+    key: t,
+    onClick: () => setTab(t),
+    style: {
+      flex: 1,
+      background: tab === t ? C.wood : "none",
+      color: tab === t ? C.white : C.brownMid,
+      border: "none",
+      borderRadius: 50,
+      padding: "7px 0",
+      fontSize: 13,
+      fontWeight: 700,
+      cursor: "pointer",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      transition: "all 0.2s",
+      boxShadow: tab === t ? `0 2px 0 ${C.woodDark}` : "none"
+    }
+  }, l))), tab === "export" ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.greenPale,
+      border: `2px dashed ${C.greenLight}`,
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      lineHeight: 1.7
+    }
+  }, "\uD83D\uDCDA ", /*#__PURE__*/React.createElement("strong", null, books.length, "\u518A"), "\u306E\u30C7\u30FC\u30BF\u3092\u30A8\u30AF\u30B9\u30DD\u30FC\u30C8\u3059\u308B\u3088\uD83C\uDF3F")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    onClick: doExport,
+    style: bs(C.wood, C.white, {
+      width: "100%",
+      fontSize: 14
+    }),
+    onMouseEnter: e => e.currentTarget.style.opacity = "0.88",
+    onMouseLeave: e => e.currentTarget.style.opacity = "1"
+  }, "\uD83D\uDCBE \u30D5\u30EB\u30C7\u30FC\u30BF\uFF08\u753B\u50CF\u8FBC\u307F\uFF09"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "5px 0 0 4px",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u30FB\u5225\u30C7\u30D0\u30A4\u30B9\u3078\u306E\u79FB\u884C\u7528")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    onClick: doExportTextOnly,
+    style: bs(C.green, C.white, {
+      width: "100%",
+      fontSize: 14
+    }),
+    onMouseEnter: e => e.currentTarget.style.opacity = "0.88",
+    onMouseLeave: e => e.currentTarget.style.opacity = "1"
+  }, "\uD83D\uDCC4 \u30C6\u30AD\u30B9\u30C8\u306E\u307F\uFF08\u753B\u50CF\u306A\u3057\uFF09"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "5px 0 0 4px",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "AI\u306B\u6E21\u3059\u30FB\u8EFD\u91CF\u5171\u6709\u7528\uFF08\u8868\u7D19\u753B\u50CF\u3092\u9664\u5916\uFF09")))) : /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.bluePale,
+      border: `2px dashed ${C.blue}44`,
+      borderRadius: 16,
+      padding: 14,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      lineHeight: 1.7
+    }
+  }, "\u26A0\uFE0F \u30A4\u30F3\u30DD\u30FC\u30C8\u3059\u308B\u3068", /*#__PURE__*/React.createElement("strong", null, "\u65E2\u5B58\u306E\u30C7\u30FC\u30BF\u3068\u7D71\u5408"), "\u3055\u308C\u308B\u3088\uFF08\u540C\u3058ID\u306E\u30C7\u30FC\u30BF\u306F\u4E0A\u66F8\u304D\uFF09\u3002", /*#__PURE__*/React.createElement("br", null), "JSON\u30D5\u30A1\u30A4\u30EB\u3092\u9078\u629E\u3059\u308B\u304B\u3001\u30C6\u30AD\u30B9\u30C8\u3092\u30DA\u30FC\u30B9\u30C8\u3057\u3066\u306D\u3002")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83D\uDCC1 JSON\u30D5\u30A1\u30A4\u30EB\u3092\u9078\u629E"), /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: ".json",
+    onChange: handleFile,
+    style: {
+      ...is,
+      padding: "8px 14px",
+      fontSize: 12
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement(Lbl, null, "\uD83D\uDCDD \u307E\u305F\u306F\u30C6\u30AD\u30B9\u30C8\u3092\u30DA\u30FC\u30B9\u30C8"), /*#__PURE__*/React.createElement("textarea", {
+    value: importText,
+    onChange: e => setImportText(e.target.value),
+    placeholder: "{\"books\":[...]} \u307E\u305F\u306F\u914D\u5217\u3092\u305D\u306E\u307E\u307E\u30DA\u30FC\u30B9\u30C8",
+    rows: 6,
+    style: {
+      ...is,
+      resize: "vertical",
+      lineHeight: 1.6
+    }
+  })), importError && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: "#E05050",
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      background: "#FFF0F0",
+      padding: "8px 12px",
+      borderRadius: 10
+    }
+  }, "\u26A0\uFE0F ", importError), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: doImport,
+    disabled: !importText.trim(),
+    style: bs(importText.trim() ? C.wood : C.brownPale, importText.trim() ? C.white : C.brownLight, {
+      flex: 1,
+      fontSize: 14
+    })
+  }, "\uD83D\uDCE5 \u30A4\u30F3\u30DD\u30FC\u30C8\u3059\u308B"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: bs(C.brownPale, C.brownMid, {
+      border: `1.5px solid ${C.woodBorder}`,
+      boxShadow: "none"
+    })
+  }, "\u3084\u3081\u308B"))));
+}
+
+// ── 振り返りビュー ────────────────────────────────
+function ReviewView({
+  books,
+  groupBy
+}) {
+  const grouped = {};
+  books.filter(b => b.status === "done" && b.doneDate).forEach(b => {
+    const key = groupBy === "weekly" ? getWeekKey(b.doneDate) : getMonthKey(b.doneDate);
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(b);
+  });
+  const periods = Object.entries(grouped).sort((a, b) => b[0].localeCompare(a[0]));
+  const exportPDF = (periodKey, pbooks) => {
+    const html = `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><title>読書レポート</title>
+<style>@import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700&display=swap');
+body{font-family:'M PLUS Rounded 1c',sans-serif;max-width:700px;margin:40px auto;color:#5C3D1E;background:#FDF8F0;padding:0 20px}
+h1{color:#8B6045;border-bottom:3px solid #C8956A;padding-bottom:10px}.meta{color:#B89070;font-size:13px;margin-bottom:28px}
+.book{display:flex;gap:16px;margin-bottom:20px;padding:16px;background:#FFFCF6;border:2px solid #D9B48A;border-radius:16px}
+.book img{width:56px;height:80px;object-fit:cover;border-radius:8px;border:2px solid #D9B48A}
+.ph{width:56px;height:80px;background:#FFF8DC;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:22px}
+h3{margin:0 0 3px;font-size:15px}.auth{color:#A07850;font-size:12px;margin:0 0 7px}
+.tags{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.tag{background:#EDF5EC;color:#7DB87A;border:1.5px solid #B8D9B5;border-radius:50px;padding:2px 10px;font-size:11px}
+.notes{border-left:3px solid #B8D9B5;padding-left:12px;margin-top:8px}
+.note{background:#FFF8DC;border-radius:8px;padding:7px 10px;margin-bottom:6px;font-size:12px;line-height:1.7}
+.nd{font-size:10px;color:#B89070;margin-top:3px}.done{font-size:11px;color:#B89070;margin-top:5px}</style>
+</head><body>
+<h1>🍀 読書レポート</h1><p class="meta">${periodKey}｜計 <strong>${pbooks.length} 冊</strong></p>
+${pbooks.map(b => `<div class="book">${b.cover ? `<img src="${b.cover}"/>` : '<div class="ph">📖</div>'}<div style="flex:1"><h3>${b.title}</h3>${b.author ? `<p class="auth">✍️ ${b.author}</p>` : ""}${b.tags?.length ? `<div class="tags">${b.tags.map(t => `<span class="tag">🌿 ${t}</span>`).join("")}</div>` : ""}${b.notes?.length ? `<div class="notes">${b.notes.map(n => `<div class="note">${n.text}<p class="nd">🕐 ${new Date(n.createdAt).toLocaleDateString("ja-JP")}</p></div>`).join("")}</div>` : ""}${b.doneDate ? `<p class="done">📅 ${formatDate(b.doneDate)}</p>` : ""}</div></div>`).join("")}
+</body></html>`;
+    const win = window.open("", "_blank");
+    win.document.write(html);
+    win.document.close();
+    setTimeout(() => win.print(), 600);
+  };
+  if (periods.length === 0) return /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: 60,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 48,
+      marginBottom: 12
+    }
+  }, "\uD83C\uDF31"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 14
+    }
+  }, "\u8AAD\u4E86\u3057\u305F\u672C\u306B\u8AAD\u4E86\u65E5\u3092\u8A2D\u5B9A\u3059\u308B\u3068", /*#__PURE__*/React.createElement("br", null), "\u3053\u3053\u306B\u632F\u308A\u8FD4\u308A\u304C\u8868\u793A\u3055\u308C\u307E\u3059"));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 32
+    }
+  }, periods.map(([period, pbooks]) => /*#__PURE__*/React.createElement("div", {
+    key: period
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 14,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: 0,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      color: C.text,
+      fontSize: 17,
+      fontWeight: 800
+    }
+  }, "\uD83C\uDF40 ", period), /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: C.greenPale,
+      color: C.green,
+      border: `1.5px solid ${C.greenLight}`,
+      borderRadius: 50,
+      padding: "2px 12px",
+      fontSize: 12,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700
+    }
+  }, pbooks.length, " \u518A"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => exportPDF(period, pbooks),
+    style: {
+      ...bs(C.brownPale, C.brownMid, {
+        padding: "4px 14px",
+        fontSize: 11,
+        border: `1.5px solid ${C.woodBorder}`,
+        boxShadow: "none",
+        marginLeft: "auto"
+      })
+    }
+  }, "\uD83D\uDCC4 PDF\u30EC\u30DD\u30FC\u30C8")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, pbooks.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    style: cs({
+      padding: 14,
+      display: "flex",
+      gap: 12
+    })
+  }, b.cover ? /*#__PURE__*/React.createElement("img", {
+    src: b.cover,
+    style: {
+      width: 44,
+      height: 62,
+      objectFit: "cover",
+      borderRadius: 8,
+      border: `2px solid ${C.woodBorder}`
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 44,
+      height: 62,
+      background: C.yellowPale,
+      borderRadius: 8,
+      border: `2px solid ${C.woodBorder}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 20
+    }
+  }, "\uD83D\uDCD6"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 3px",
+      fontSize: 14,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 800
+    }
+  }, b.title), b.author && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 6px",
+      fontSize: 11,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u270D\uFE0F ", b.author), b.tags?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexWrap: "wrap",
+      marginBottom: 6
+    }
+  }, b.tags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t
+  }))), b.notes?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderLeft: `3px solid ${C.greenLight}`,
+      paddingLeft: 10,
+      marginTop: 6,
+      display: "flex",
+      flexDirection: "column",
+      gap: 4
+    }
+  }, b.notes.map(n => /*#__PURE__*/React.createElement("p", {
+    key: n.id,
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: C.brownMid,
+      lineHeight: 1.6,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.textLight,
+      fontSize: 10,
+      marginRight: 5
+    }
+  }, new Date(n.createdAt).toLocaleDateString("ja-JP")), n.text))))))))));
+}
+
+// ── 詳細ポップアップ（共通） ──────────────────────
+function DetailPopup({
+  detail,
+  onEdit,
+  onNotes,
+  onDelete,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 1000,
+      background: "rgba(92,61,30,0.35)",
+      backdropFilter: "blur(4px)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: C.bgPanel,
+      border: `3px solid ${C.woodBorder}`,
+      borderRadius: 24,
+      padding: 24,
+      maxWidth: 400,
+      width: "100%",
+      boxShadow: `0 8px 0 ${C.woodLight}, 0 16px 40px ${C.shadow}`,
+      animation: "modalIn 0.22s cubic-bezier(.34,1.56,.64,1)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      marginBottom: 16
+    }
+  }, detail.cover ? /*#__PURE__*/React.createElement("img", {
+    src: detail.cover,
+    style: {
+      width: 72,
+      height: 102,
+      objectFit: "cover",
+      borderRadius: 10,
+      border: `2px solid ${C.woodBorder}`,
+      flexShrink: 0,
+      boxShadow: `2px 4px 0 ${C.woodLight}`
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 72,
+      height: 102,
+      background: `linear-gradient(145deg,${C.yellowPale},${C.brownPale})`,
+      borderRadius: 10,
+      border: `2px solid ${C.woodBorder}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 32,
+      flexShrink: 0
+    }
+  }, "\uD83D\uDCD6"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      fontSize: 15,
+      fontWeight: 800,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      lineHeight: 1.4
+    }
+  }, detail.title), detail.author && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 8px",
+      fontSize: 12,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u270D\uFE0F ", detail.author), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 5,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(StatusBadge, {
+    status: detail.status
+  }), (detail.media || []).map(m => MEDIA[m] && /*#__PURE__*/React.createElement("span", {
+    key: m,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      background: C.brownPale,
+      color: C.brownMid,
+      border: `1.5px solid ${C.woodBorder}`,
+      borderRadius: 50,
+      padding: "3px 10px",
+      fontSize: 11,
+      fontWeight: 700,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, MEDIA[m].icon, " ", MEDIA[m].label))), detail.doneDate && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDCC5 \u8AAD\u4E86 ", formatDate(detail.doneDate)), detail.status !== "done" && detail.createdAt && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDCDD \u767B\u9332 ", formatDate(detail.createdAt.slice(0, 10))))), detail.tags?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexWrap: "wrap",
+      marginBottom: 10
+    }
+  }, detail.tags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t
+  }))), detail.notes?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.yellowPale,
+      border: `1px dashed ${C.woodBorder}`,
+      borderRadius: 12,
+      padding: "10px 12px",
+      marginBottom: 10,
+      maxHeight: 120,
+      overflowY: "auto"
+    }
+  }, detail.notes.map(n => /*#__PURE__*/React.createElement("p", {
+    key: n.id,
+    style: {
+      margin: "0 0 6px",
+      fontSize: 12,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      lineHeight: 1.6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10,
+      color: C.textLight,
+      marginRight: 5
+    }
+  }, fmtTime(n.createdAt)), n.text))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onNotes(detail);
+      onClose();
+    },
+    style: bs(C.green, C.white, {
+      flex: 1,
+      padding: "8px 0",
+      fontSize: 12
+    })
+  }, "\uD83D\uDCDD \u30E1\u30E2"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onEdit(detail);
+      onClose();
+    },
+    style: bs(C.brownPale, C.brownMid, {
+      flex: 1,
+      padding: "8px 0",
+      fontSize: 12,
+      border: `1.5px solid ${C.woodBorder}`,
+      boxShadow: "none"
+    })
+  }, "\u270F\uFE0F \u7DE8\u96C6"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onDelete(detail.id);
+      onClose();
+    },
+    style: bs(C.pinkPale, C.pink, {
+      padding: "8px 12px",
+      fontSize: 12,
+      border: `1.5px solid ${C.pink}44`,
+      boxShadow: "none"
+    })
+  }, "\uD83D\uDDD1")), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      width: "100%",
+      marginTop: 10,
+      ...bs(C.brownPale, C.brownMid, {
+        border: `1.5px solid ${C.woodBorder}`,
+        boxShadow: "none"
+      })
+    }
+  }, "\u3068\u3058\u308B")));
+}
+
+// ── 検索ビュー ────────────────────────────────────
+function SearchView({
+  srchStatus,
+  setSrchStatus,
+  srchFrom,
+  setSrchFrom,
+  srchTo,
+  setSrchTo,
+  searchResults,
+  onEdit,
+  onNotes,
+  onDelete
+}) {
+  const [detail, setDetail] = useState(null);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...cs({
+        padding: 16,
+        marginBottom: 16
+      })
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: C.brownMid,
+      fontWeight: 700,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDD0D \u30B9\u30C6\u30FC\u30BF\u30B9\u3068\u671F\u9593\u3067\u7D5E\u308A\u8FBC\u307F"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 12,
+      flexWrap: "wrap"
+    }
+  }, [["all", "すべて 🌿"], ["want", "読みたい 🌟"], ["reading", "読書中 💧"], ["done", "読了 🍀"]].map(([k, l]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    onClick: () => setSrchStatus(k),
+    style: {
+      background: srchStatus === k ? C.wood : C.white,
+      color: srchStatus === k ? C.white : C.brownMid,
+      border: `2px solid ${srchStatus === k ? C.woodDark : C.woodBorder}`,
+      borderRadius: 50,
+      padding: "6px 14px",
+      fontSize: 12,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700,
+      cursor: "pointer",
+      boxShadow: srchStatus === k ? `0 3px 0 ${C.woodDark}` : `0 2px 0 ${C.woodBorder}`,
+      transition: "all 0.15s"
+    }
+  }, l))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: srchFrom,
+    onChange: e => setSrchFrom(e.target.value),
+    style: {
+      ...is,
+      flex: 1,
+      minWidth: 130,
+      fontSize: 13
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.brownLight,
+      fontWeight: 700,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u301C"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: srchTo,
+    onChange: e => setSrchTo(e.target.value),
+    style: {
+      ...is,
+      flex: 1,
+      minWidth: 130,
+      fontSize: 13
+    }
+  }), (srchFrom || srchTo) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setSrchFrom("");
+      setSrchTo("");
+    },
+    style: bs(C.brownPale, C.brownMid, {
+      padding: "6px 12px",
+      fontSize: 11,
+      boxShadow: "none",
+      border: `1.5px solid ${C.woodBorder}`
+    })
+  }, "\u30AF\u30EA\u30A2")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "8px 0 0",
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u203B \u8AAD\u4E86\u306F\u8AAD\u4E86\u65E5\u3001\u305D\u308C\u4EE5\u5916\u306F\u767B\u9332\u65E5\u3067\u5224\u5B9A\u3057\u307E\u3059")), searchResults.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "40px 0",
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 40,
+      marginBottom: 10
+    }
+  }, "\uD83C\uDF31"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, "\u6761\u4EF6\u306B\u5408\u3046\u672C\u304C\u898B\u3064\u304B\u3089\u306A\u304B\u3063\u305F\u3088")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: C.brownMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700
+    }
+  }, searchResults.length, " \u518A\u307F\u3064\u304B\u3063\u305F\u3088 \uD83C\uDF40"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, searchResults.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    onClick: () => setDetail(b),
+    style: {
+      ...cs({
+        padding: 14,
+        display: "flex",
+        gap: 12,
+        cursor: "pointer",
+        transition: "all 0.2s"
+      })
+    },
+    onMouseEnter: e => e.currentTarget.style.transform = "translateY(-2px)",
+    onMouseLeave: e => e.currentTarget.style.transform = ""
+  }, b.cover ? /*#__PURE__*/React.createElement("img", {
+    src: b.cover,
+    style: {
+      width: 44,
+      height: 62,
+      objectFit: "cover",
+      borderRadius: 8,
+      border: `2px solid ${C.woodBorder}`,
+      flexShrink: 0
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 44,
+      height: 62,
+      background: C.yellowPale,
+      borderRadius: 8,
+      border: `2px solid ${C.woodBorder}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 20,
+      flexShrink: 0
+    }
+  }, "\uD83D\uDCD6"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 3px",
+      fontSize: 14,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 800,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, b.title), b.author && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 5px",
+      fontSize: 11,
+      color: C.textMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\u270D\uFE0F ", b.author), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      flexWrap: "wrap",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement(StatusBadge, {
+    status: b.status
+  }), (b.media || []).map(m => MEDIA[m] && /*#__PURE__*/React.createElement("span", {
+    key: m,
+    style: {
+      fontSize: 11
+    }
+  }, MEDIA[m].icon)), b.status === "done" && b.doneDate && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDCC5 ", formatDate(b.doneDate)), b.status !== "done" && b.createdAt && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, "\uD83D\uDCDD ", formatDate(b.createdAt.slice(0, 10)))), b.tags?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexWrap: "wrap",
+      marginTop: 5
+    }
+  }, b.tags.map(t => /*#__PURE__*/React.createElement(Tag, {
+    key: t,
+    label: t
+  }))), b.notes?.length > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "5px 0 0",
+      fontSize: 12,
+      color: C.brownMid,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, "\uD83D\uDCDD ", b.notes[b.notes.length - 1].text)))))), detail && /*#__PURE__*/React.createElement(DetailPopup, {
+    detail: detail,
+    onEdit: onEdit,
+    onNotes: onNotes,
+    onDelete: onDelete,
+    onClose: () => setDetail(null)
+  }));
+}
+
+// ── グリッドビュー ────────────────────────────────
+function GridView({
+  books,
+  onEdit,
+  onNotes,
+  onDelete
+}) {
+  const [detail, setDetail] = useState(null);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(4, 1fr)",
+      gap: 10
+    }
+  }, books.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    onClick: () => setDetail(b),
+    style: {
+      cursor: "pointer",
+      borderRadius: 12,
+      overflow: "hidden",
+      border: `2px solid ${C.woodBorder}`,
+      boxShadow: `0 3px 0 ${C.woodLight}`,
+      transition: "all 0.18s",
+      background: C.bgPanel
+    },
+    onMouseEnter: e => {
+      e.currentTarget.style.transform = "translateY(-3px)";
+      e.currentTarget.style.boxShadow = `0 6px 0 ${C.woodLight}`;
+    },
+    onMouseLeave: e => {
+      e.currentTarget.style.transform = "";
+      e.currentTarget.style.boxShadow = `0 3px 0 ${C.woodLight}`;
+    }
+  }, b.cover ? /*#__PURE__*/React.createElement("img", {
+    src: b.cover,
+    alt: b.title,
+    style: {
+      width: "100%",
+      aspectRatio: "2/3",
+      objectFit: "cover",
+      display: "block"
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      aspectRatio: "2/3",
+      background: `linear-gradient(145deg,${C.yellowPale},${C.brownPale})`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 32
+    }
+  }, "\uD83D\uDCD6"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "6px 7px 7px"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 10,
+      fontWeight: 800,
+      color: C.text,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      display: "-webkit-box",
+      WebkitLineClamp: 2,
+      WebkitBoxOrient: "vertical",
+      lineHeight: 1.4
+    }
+  }, b.title), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 4,
+      display: "flex",
+      alignItems: "center",
+      gap: 3
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11
+    }
+  }, STATUS[b.status].icon), (b.media || []).map(m => MEDIA[m] && /*#__PURE__*/React.createElement("span", {
+    key: m,
+    style: {
+      fontSize: 11
+    }
+  }, MEDIA[m].icon))))))), detail && /*#__PURE__*/React.createElement(DetailPopup, {
+    detail: detail,
+    onEdit: onEdit,
+    onNotes: onNotes,
+    onDelete: onDelete,
+    onClose: () => setDetail(null)
+  }));
+}
+
+// ── メインアプリ ──────────────────────────────────
+function App() {
+  const [books, setBooks] = useState([]);
+  const [ready, setReady] = useState(false);
+  const [view, setView] = useState("all");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [filterTag, setFilterTag] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [editBook, setEditBook] = useState(null);
+  const [notesBook, setNotesBook] = useState(null);
+  const [showAI, setShowAI] = useState(false);
+  const [showData, setShowData] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const [toast, setToast] = useState(null);
+
+  // 初回: localStorage移行 → IndexedDB読み込み
+  useEffect(() => {
+    (async () => {
+      await migrateFromLocalStorage();
+      const loaded = await loadFromStorage();
+      setBooks(loaded);
+      setReady(true);
+    })();
+  }, []);
+
+  // データ変更時に保存（ready後のみ）
+  useEffect(() => {
+    if (!ready) return;
+    saveToStorage(books);
+  }, [books, ready]);
+  const showToast = msg => setToast(msg);
+  const saveBook = b => {
+    const now = new Date().toISOString();
+    const bookWithDate = b.createdAt ? b : {
+      ...b,
+      createdAt: now
+    };
+    setBooks(prev => prev.find(x => x.id === b.id) ? prev.map(x => x.id === b.id ? bookWithDate : x) : [...prev, bookWithDate]);
+    setShowAdd(false);
+    setEditBook(null);
+  };
+  const deleteBook = id => {
+    if (confirm("この本を削除する？")) setBooks(prev => prev.filter(x => x.id !== id));
+  };
+  const handleImport = importedBooks => {
+    setBooks(prev => {
+      const map = new Map(prev.map(b => [b.id, b]));
+      importedBooks.forEach(b => map.set(b.id, b));
+      return Array.from(map.values());
+    });
+  };
+  const [layout, setLayout] = useState("list"); // list | grid
+  const [srchStatus, setSrchStatus] = useState("all");
+  const [srchFrom, setSrchFrom] = useState("");
+  const [srchTo, setSrchTo] = useState("");
+
+  // 検索ビュー用フィルター（登録日 or 読了日で期間判定）
+  const searchResults = books.filter(b => {
+    if (srchStatus !== "all" && b.status !== srchStatus) return false;
+    const dateStr = b.status === "done" && b.doneDate ? b.doneDate : b.createdAt ? b.createdAt.slice(0, 10) : "";
+    if (srchFrom && dateStr && dateStr < srchFrom) return false;
+    if (srchTo && dateStr && dateStr > srchTo) return false;
+    return true;
+  }).sort((a, b) => {
+    const da = a.status === "done" && a.doneDate ? a.doneDate : (a.createdAt || "").slice(0, 10);
+    const db = b.status === "done" && b.doneDate ? b.doneDate : (b.createdAt || "").slice(0, 10);
+    return db.localeCompare(da);
+  });
+  const allTags = [...new Set(books.flatMap(b => b.tags || []))];
+  const filtered = books.filter(b => {
+    if (filterStatus !== "all" && b.status !== filterStatus) return false;
+    if (filterTag && !(b.tags || []).includes(filterTag)) return false;
+    if (searchText && !b.title.toLowerCase().includes(searchText.toLowerCase()) && !(b.author || "").toLowerCase().includes(searchText.toLowerCase())) return false;
+    return true;
+  });
+  const counts = {
+    all: books.length,
+    ...Object.fromEntries(Object.keys(STATUS).map(k => [k, books.filter(b => b.status === k).length]))
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: "100vh",
+      background: C.bg,
+      color: C.text
+    }
+  }, !ready && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: C.bg,
+      zIndex: 9999,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 40,
+      animation: "leafSpin 1s ease-in-out infinite"
+    }
+  }, "\uD83C\uDF3F"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      color: C.brownMid,
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, "\u672C\u68DA\u3092\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: `linear-gradient(180deg,${C.woodLight} 0%,${C.wood} 100%)`,
+      borderBottom: `4px solid ${C.woodDark}`,
+      padding: "0 16px",
+      position: "sticky",
+      top: 0,
+      zIndex: 100
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      inset: 0,
+      opacity: 0.07,
+      backgroundImage: "repeating-linear-gradient(90deg,transparent,transparent 48px,#5C3D1E 48px,#5C3D1E 49px)",
+      pointerEvents: "none"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxWidth: 820,
+      margin: "0 auto",
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      height: 60,
+      position: "relative"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 24,
+      filter: "drop-shadow(0 2px 2px rgba(0,0,0,0.2))"
+    }
+  }, "\uD83C\uDFE0"), /*#__PURE__*/React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 19,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 800,
+      color: C.white,
+      textShadow: "0 2px 4px rgba(0,0,0,0.2)"
+    }
+  }, "my", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.yellowPale
+    }
+  }, "shelf"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      background: "rgba(255,255,255,0.18)",
+      borderRadius: 50,
+      padding: 3,
+      gap: 2
+    }
+  }, [["all", "📚"], ["search", "🔍"]].map(([v, l]) => /*#__PURE__*/React.createElement("button", {
+    key: v,
+    onClick: () => setView(v),
+    style: {
+      background: view === v ? C.white : "none",
+      color: view === v ? C.wood : "rgba(255,255,255,0.85)",
+      border: "none",
+      borderRadius: 50,
+      width: 36,
+      height: 28,
+      fontSize: 16,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: view === v ? 800 : 400,
+      transition: "all 0.2s",
+      cursor: "pointer"
+    }
+  }, l))), view === "all" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      background: "rgba(255,255,255,0.18)",
+      borderRadius: 50,
+      padding: 3,
+      gap: 2
+    }
+  }, [["list", "☰"], ["grid", "⊞"]].map(([l, icon]) => /*#__PURE__*/React.createElement("button", {
+    key: l,
+    onClick: () => setLayout(l),
+    style: {
+      background: layout === l ? C.white : "none",
+      color: layout === l ? C.wood : "rgba(255,255,255,0.85)",
+      border: "none",
+      borderRadius: 50,
+      width: 32,
+      height: 28,
+      fontSize: 15,
+      cursor: "pointer",
+      transition: "all 0.2s"
+    }
+  }, icon))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowData(true),
+    style: {
+      background: "rgba(255,255,255,0.18)",
+      color: C.white,
+      border: "1.5px solid rgba(255,255,255,0.35)",
+      borderRadius: 50,
+      padding: "6px 12px",
+      fontSize: 12,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDCE6"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowAI(true),
+    style: {
+      background: C.yellowPale,
+      color: C.woodDark,
+      border: "none",
+      borderRadius: 50,
+      padding: "6px 14px",
+      fontSize: 12,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700,
+      boxShadow: `0 3px 0 ${C.woodDark}44`,
+      cursor: "pointer"
+    },
+    onMouseEnter: e => e.currentTarget.style.opacity = "0.88",
+    onMouseLeave: e => e.currentTarget.style.opacity = "1"
+  }, "\u2728 AI\u7528"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 12,
+      background: `linear-gradient(180deg,${C.woodDark} 0%,${C.wood} 100%)`,
+      boxShadow: `0 4px 8px ${C.shadow}`
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxWidth: 820,
+      margin: "0 auto",
+      padding: "20px 16px 100px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 16,
+      flexWrap: "wrap"
+    }
+  }, [["all", "すべて 🌿"], ["want", "読みたい 🌟"], ["reading", "読書中 💧"], ["done", "読了 🍀"]].map(([k, l]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    onClick: () => setFilterStatus(k),
+    style: {
+      background: filterStatus === k ? C.wood : C.bgPanel,
+      color: filterStatus === k ? C.white : C.brownMid,
+      border: `2px solid ${filterStatus === k ? C.woodDark : C.woodBorder}`,
+      borderRadius: 50,
+      padding: "7px 14px",
+      fontSize: 12,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif",
+      fontWeight: 700,
+      cursor: "pointer",
+      boxShadow: filterStatus === k ? `0 3px 0 ${C.woodDark}` : `0 2px 0 ${C.woodBorder}`,
+      transition: "all 0.15s"
+    }
+  }, l, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: filterStatus === k ? "rgba(255,255,255,0.25)" : C.brownPale,
+      color: filterStatus === k ? C.white : C.brownLight,
+      borderRadius: 50,
+      padding: "1px 7px",
+      fontSize: 11,
+      marginLeft: 4
+    }
+  }, counts[k])))), view === "all" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      marginBottom: 18,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 180,
+      position: "relative"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: "absolute",
+      left: 12,
+      top: "50%",
+      transform: "translateY(-50%)",
+      fontSize: 14,
+      pointerEvents: "none"
+    }
+  }, "\uD83D\uDD0D"), /*#__PURE__*/React.createElement("input", {
+    value: searchText,
+    onChange: e => setSearchText(e.target.value),
+    placeholder: "\u30BF\u30A4\u30C8\u30EB\u30FB\u8457\u8005\u3067\u7D5E\u308A\u8FBC\u307F\u2026",
+    style: {
+      ...is,
+      paddingLeft: 34
+    }
+  })), allTags.length > 0 && /*#__PURE__*/React.createElement("select", {
+    value: filterTag,
+    onChange: e => setFilterTag(e.target.value),
+    style: {
+      ...is,
+      width: "auto",
+      color: filterTag ? C.green : C.textLight
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uD83C\uDFF7 \u30BF\u30B0\u3067\u7D5E\u308A\u8FBC\u307F"), allTags.map(t => /*#__PURE__*/React.createElement("option", {
+    key: t,
+    value: t
+  }, t)))), view === "search" ? /*#__PURE__*/React.createElement(SearchView, {
+    books: books,
+    srchStatus: srchStatus,
+    setSrchStatus: setSrchStatus,
+    srchFrom: srchFrom,
+    setSrchFrom: setSrchFrom,
+    srchTo: srchTo,
+    setSrchTo: setSrchTo,
+    searchResults: searchResults,
+    onEdit: setEditBook,
+    onNotes: setNotesBook,
+    onDelete: deleteBook
+  }) : filtered.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "60px 0",
+      color: C.textLight,
+      fontFamily: "'M PLUS Rounded 1c', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 52,
+      marginBottom: 12
+    }
+  }, "\uD83C\uDFE1"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: C.brownMid,
+      margin: "0 0 6px"
+    }
+  }, "\u672C\u68DA\u304C\u307E\u3060\u7A7A\u3063\u307D\u3060\u3088"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      margin: 0
+    }
+  }, "\u300C\uFF0B \u8FFD\u52A0\u300D\u304B\u3089\u672C\u3092\u767B\u9332\u3057\u3066\u307F\u3088\u3046\uFF01")) : /*#__PURE__*/React.createElement(React.Fragment, null, layout === "grid" ? /*#__PURE__*/React.createElement(GridView, {
+    books: filtered,
+    onEdit: setEditBook,
+    onNotes: setNotesBook,
+    onDelete: deleteBook
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, filtered.map(b => /*#__PURE__*/React.createElement(BookCard, {
+    key: b.id,
+    book: b,
+    onEdit: setEditBook,
+    onNotes: setNotesBook,
+    onDelete: deleteBook
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 12,
+      marginTop: 20,
+      borderRadius: "0 0 6px 6px",
+      background: `linear-gradient(180deg,${C.woodDark} 0%,${C.wood} 100%)`,
+      boxShadow: `0 4px 8px ${C.shadow}`
+    }
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowAdd(true),
+    style: {
+      position: "fixed",
+      bottom: 32,
+      right: 24,
+      zIndex: 200,
+      width: 64,
+      height: 64,
+      borderRadius: "50%",
+      background: `linear-gradient(145deg, #9ACD6E, ${C.green})`,
+      color: C.white,
+      border: `3px solid rgba(255,255,255,0.5)`,
+      fontSize: 30,
+      fontWeight: 800,
+      cursor: "pointer",
+      boxShadow: `0 6px 0 ${C.woodDark}66, 0 8px 24px rgba(125,184,122,0.45)`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      animation: "fabBounce 0.4s cubic-bezier(.34,1.56,.64,1)",
+      WebkitTapHighlightColor: "transparent"
+    },
+    onMouseEnter: e => {
+      e.currentTarget.style.transform = "scale(1.1) translateY(-2px)";
+      e.currentTarget.style.boxShadow = `0 8px 0 ${C.woodDark}66, 0 12px 28px rgba(125,184,122,0.55)`;
+    },
+    onMouseLeave: e => {
+      e.currentTarget.style.transform = "";
+      e.currentTarget.style.boxShadow = `0 6px 0 ${C.woodDark}66, 0 8px 24px rgba(125,184,122,0.45)`;
+    },
+    onTouchStart: e => {
+      e.currentTarget.style.transform = "scale(0.94)";
+    },
+    onTouchEnd: e => {
+      e.currentTarget.style.transform = "";
+    },
+    "aria-label": "\u672C\u3092\u8FFD\u52A0"
+  }, "\uFF0B"), showAdd && /*#__PURE__*/React.createElement(BookModal, {
+    book: {},
+    onSave: saveBook,
+    onClose: () => setShowAdd(false)
+  }), editBook && /*#__PURE__*/React.createElement(BookModal, {
+    book: editBook,
+    onSave: saveBook,
+    onClose: () => setEditBook(null)
+  }), notesBook && /*#__PURE__*/React.createElement(NotesModal, {
+    book: notesBook,
+    onSave: updated => {
+      saveBook(updated);
+      setNotesBook(updated);
+    },
+    onClose: () => setNotesBook(null)
+  }), showAI && /*#__PURE__*/React.createElement(AIPromptModal, {
+    books: books,
+    onClose: () => setShowAI(false),
+    onToast: showToast
+  }), showData && /*#__PURE__*/React.createElement(DataModal, {
+    books: books,
+    onImport: handleImport,
+    onClose: () => setShowData(false),
+    onToast: showToast
+  }), toast && /*#__PURE__*/React.createElement(Toast, {
+    msg: toast,
+    onDone: () => setToast(null)
+  }));
+}
+ReactDOM.createRoot(document.getElementById("root")).render( /*#__PURE__*/React.createElement(App, null));
+</script>
+</body>
+</html>
